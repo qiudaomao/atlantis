@@ -98,7 +98,7 @@ extension NetworkInjector {
         if !ProcessInfo.processInfo.responds(to: #selector(getter: ProcessInfo.operatingSystemVersion)) {
             baseResumeClass = NSClassFromString("__NSCFLocalSessionTask")
         } else {
-            #if targetEnvironment(macCatalyst)
+            #if targetEnvironment(macCatalyst) || os(macOS)
             baseResumeClass = URLSessionTask.self
             #else
             let majorVersion = ProcessInfo.processInfo.operatingSystemVersion.majorVersion
