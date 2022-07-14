@@ -8,6 +8,10 @@
 
 import Foundation
 
+func logError(name: String) {
+    print("❌ [Atlantis] Could not swizzle this func: \(name)! It looks like the latest iOS (beta) has changed, please contact support@proxyman.io")
+}
+
 extension NetworkInjector {
 
     func _swizzleURLSessionResumeSelector(baseClass: AnyClass) {
@@ -15,6 +19,7 @@ extension NetworkInjector {
         let selector = NSSelectorFromString("resume")
         guard let method = class_getInstanceMethod(baseClass, selector),
             baseClass.instancesRespond(to: selector) else {
+            logError(name: "_swizzleURLSessionResumeSelector")
             return
         }
 
@@ -49,18 +54,24 @@ extension NetworkInjector {
     /// urlSession(_:dataTask:didReceive:completionHandler:)
     /// https://developer.apple.com/documentation/foundation/urlsessiondatadelegate/1410027-urlsession
     func _swizzleURLSessionDataTaskDidReceiveResponse(baseClass: AnyClass) {
-        if #available(iOS 13.0, *) {
-            _swizzleURLSessionDataTaskDidReceiveResponseForIOS13AndLater(baseClass: baseClass)
+        // For iOS 16 and later, it uses the same method as iOS 12 and later
+        // https://github.com/ProxymanApp/Proxyman/issues/1271
+        if #available(iOS 16.0, *) {
+            _swizzleURLSessionDataTaskDidReceiveResponseWithoutRewrite(baseClass: baseClass)
+        } else if #available(iOS 13.0, *) {
+            // Except for the iOS 13, iOS 14, iOS 15, it has a slightly different method
+            _swizzleURLSessionDataTaskDidReceiveResponseWithRewrite(baseClass: baseClass)
         } else {
-            _swizzleURLSessionDataTaskDidReceiveResponseForBelowIOS13(baseClass: baseClass)
+            _swizzleURLSessionDataTaskDidReceiveResponseWithoutRewrite(baseClass: baseClass)
         }
     }
 
-    func _swizzleURLSessionDataTaskDidReceiveResponseForIOS13AndLater(baseClass: AnyClass) {
+    private func _swizzleURLSessionDataTaskDidReceiveResponseWithRewrite(baseClass: AnyClass) {
         // Prepare
         let selector = NSSelectorFromString("_didReceiveResponse:sniff:rewrite:")
         guard let method = class_getInstanceMethod(baseClass, selector),
             baseClass.instancesRespond(to: selector) else {
+            logError(name: "_swizzleURLSessionDataTaskDidReceiveResponseWithRewrite")
             return
         }
 
@@ -87,11 +98,12 @@ extension NetworkInjector {
         method_setImplementation(method, imp_implementationWithBlock(block))
     }
 
-    private func _swizzleURLSessionDataTaskDidReceiveResponseForBelowIOS13(baseClass: AnyClass) {
+    private func _swizzleURLSessionDataTaskDidReceiveResponseWithoutRewrite(baseClass: AnyClass) {
         // Prepare
         let selector = NSSelectorFromString("_didReceiveResponse:sniff:")
         guard let method = class_getInstanceMethod(baseClass, selector),
             baseClass.instancesRespond(to: selector) else {
+            logError(name: "_swizzleURLSessionDataTaskDidReceiveResponseWithoutRewrite")
             return
         }
 
@@ -123,6 +135,7 @@ extension NetworkInjector {
         let selector = NSSelectorFromString("_didReceiveData:")
         guard let method = class_getInstanceMethod(baseClass, selector),
             baseClass.instancesRespond(to: selector) else {
+            logError(name: "_swizzleURLSessionDataTaskDidReceiveData")
             return
         }
 
@@ -153,6 +166,7 @@ extension NetworkInjector {
         let selector = NSSelectorFromString("_didFinishWithError:")
         guard let method = class_getInstanceMethod(baseClass, selector),
             baseClass.instancesRespond(to: selector) else {
+            logError(name: "_swizzleURLSessionTaskDidCompleteWithError")
             return
         }
 
@@ -175,6 +189,11 @@ extension NetworkInjector {
 
         method_setImplementation(method, imp_implementationWithBlock(block))
     }
+}
+
+// MARK: - Upload
+
+extension NetworkInjector {
 
     func _swizzleURLSessionUploadSelector(baseClass: AnyClass) {
         _swizzleURLSessionUploadFromFileSelector(baseClass)
@@ -182,17 +201,13 @@ extension NetworkInjector {
         _swizzleURLSessionUploadFromDataSelector(baseClass)
         _swizzleURLSessionUploadFromDataWithCompleteHandlerSelector(baseClass)
     }
-}
-
-// MARK: - Upload
-
-extension NetworkInjector {
 
     private func _swizzleURLSessionUploadFromFileSelector(_ baseClass: AnyClass) {
         // Prepare
         let selector = NSSelectorFromString("uploadTaskWithRequest:fromFile:")
         guard let method = class_getInstanceMethod(baseClass, selector),
             baseClass.instancesRespond(to: selector) else {
+            logError(name: "_swizzleURLSessionUploadFromFileSelector")
             return
         }
 
@@ -226,6 +241,7 @@ extension NetworkInjector {
         let selector = NSSelectorFromString("uploadTaskWithRequest:fromFile:completionHandler:")
         guard let method = class_getInstanceMethod(baseClass, selector),
             baseClass.instancesRespond(to: selector) else {
+            logError(name: "_swizzleURLSessionUploadFromFileWithCompleteHandlerSelector")
             return
         }
 
@@ -260,6 +276,7 @@ extension NetworkInjector {
         let selector = NSSelectorFromString("uploadTaskWithRequest:fromData:")
         guard let method = class_getInstanceMethod(baseClass, selector),
             baseClass.instancesRespond(to: selector) else {
+            logError(name: "_swizzleURLSessionUploadFromDataSelector")
             return
         }
 
@@ -293,6 +310,7 @@ extension NetworkInjector {
         let selector = NSSelectorFromString("uploadTaskWithRequest:fromData:completionHandler:")
         guard let method = class_getInstanceMethod(baseClass, selector),
             baseClass.instancesRespond(to: selector) else {
+            logError(name: "_swizzleURLSessionUploadFromDataWithCompleteHandlerSelector")
             return
         }
 
@@ -319,5 +337,175 @@ extension NetworkInjector {
         }
 
         method_setImplementation(method, imp_implementationWithBlock(block))
+    }
+}
+
+// MARK: - WebSocket
+
+extension NetworkInjector {
+
+    func _swizzleURLSessionWebsocketSelector() {
+        guard let websocketClass = NSClassFromString("__NSURLSessionWebSocketTask") else {
+            print("[Atlantis][ERROR] Could not inject __NSURLSessionWebSocketTask!!")
+            return
+        }
+
+        //
+        _swizzleURLSessionWebSocketSendMessageSelector(websocketClass)
+        _swizzleURLSessionWebSocketReceiveMessageSelector(websocketClass)
+        _swizzleURLSessionWebSocketSendPingPongSelector(websocketClass)
+        _swizzleURLSessionWebSocketCancelWithCloseCodeReasonSelector(websocketClass)
+    }
+
+    private func _swizzleURLSessionWebSocketSendMessageSelector(_ baseClass: AnyClass) {
+
+        // Prepare
+        let selector = NSSelectorFromString("sendMessage:completionHandler:")
+        guard let method = class_getInstanceMethod(baseClass, selector),
+            baseClass.instancesRespond(to: selector) else {
+            logError(name: "_swizzleURLSessionWebSocketSendMessageSelector")
+            return
+        }
+
+        // For safety, we should cast to AnyObject
+        // To prevent app crashes in the future if the object type is changed
+        typealias NewClosureType =  @convention(c) (AnyObject, Selector, AnyObject, AnyObject) -> Void
+        let originalImp: IMP = method_getImplementation(method)
+        let block: @convention(block) (AnyObject, AnyObject, AnyObject) -> Void = {[weak self] (me, message, block) in
+
+            // call the original
+            let original: NewClosureType = unsafeBitCast(originalImp, to: NewClosureType.self)
+            original(me, selector, message, block)
+
+            // Safe-check
+            if let task = me as? URLSessionTask {
+                // As message is `NSURLSessionWebSocketMessage` and Xcode doesn't allow to cast it.
+                // We use value(forKey:) to get the value
+                if let newMessage = self?.wrapWebSocketMessage(object: message) {
+                    self?.delegate?.injectorSessionWebSocketDidSendMessage(task: task, message: newMessage)
+                }
+            } else {
+                assertionFailure("Could not get data from _swizzleURLSessionWebSocketSendMessageSelector. It might causes due to the latest iOS changes. Please contact the author!")
+            }
+        }
+
+        method_setImplementation(method, imp_implementationWithBlock(block))
+    }
+
+    private func _swizzleURLSessionWebSocketReceiveMessageSelector(_ baseClass: AnyClass) {
+
+        // Prepare
+        let selector = NSSelectorFromString("receiveMessageWithCompletionHandler:")
+        guard let method = class_getInstanceMethod(baseClass, selector),
+            baseClass.instancesRespond(to: selector) else {
+            logError(name: "_swizzleURLSessionWebSocketReceiveMessageSelector")
+            return
+        }
+
+        // For safety, we should cast to AnyObject
+        // To prevent app crashes in the future if the object type is changed
+        typealias NewClosureType =  @convention(c) (AnyObject, Selector, AnyObject) -> Void
+        let originalImp: IMP = method_getImplementation(method)
+        let block: @convention(block) (AnyObject, AnyObject) -> Void = {[weak self](me, handler) in
+
+            // Originally implemented in Obj-C.
+            let wrapperHandler = AtlantisHelper.swizzleWebSocketReceiveMessage(withCompleteHandler: handler, responseHandler: {[weak self] (str, data, error) in
+                if let task = me as? URLSessionTask {
+                    if let message = self?.wrapWebSocketMessage(strValue: str, dataValue: data) {
+                        self?.delegate?.injectorSessionWebSocketDidReceive(task: task, message: message)
+                    }
+                } else {
+                    assertionFailure("Could not get data from _swizzleURLSessionWebSocketReceiveMessageSelector. It might causes due to the latest iOS changes. Please contact the author!")
+                }
+            }) ?? handler
+
+            // call the original
+            let original: NewClosureType = unsafeBitCast(originalImp, to: NewClosureType.self)
+            original(me, selector, wrapperHandler as AnyObject)
+        }
+
+        method_setImplementation(method, imp_implementationWithBlock(block))
+    }
+
+    private func _swizzleURLSessionWebSocketSendPingPongSelector(_ baseClass: AnyClass) {
+
+        // Prepare
+        let selector = NSSelectorFromString("sendPingWithPongReceiveHandler:")
+        guard let method = class_getInstanceMethod(baseClass, selector),
+            baseClass.instancesRespond(to: selector) else {
+            logError(name: "_swizzleURLSessionWebSocketSendPingPongSelector")
+            return
+        }
+
+        // For safety, we should cast to AnyObject
+        // To prevent app crashes in the future if the object type is changed
+        typealias NewClosureType =  @convention(c) (AnyObject, Selector, AnyObject) -> Void
+        let originalImp: IMP = method_getImplementation(method)
+        let block: @convention(block) (AnyObject, AnyObject) -> Void = {[weak self](me, handler) in
+
+            // call the original
+            let original: NewClosureType = unsafeBitCast(originalImp, to: NewClosureType.self)
+            original(me, selector, handler)
+
+            // Safe-check
+            if let task = me as? URLSessionTask {
+                self?.delegate?.injectorSessionWebSocketDidSendPingPong(task: task)
+            } else {
+                assertionFailure("Could not get data from _swizzleURLSessionWebSocketSendPingPongSelector. It might causes due to the latest iOS changes. Please contact the author!")
+            }
+        }
+
+        method_setImplementation(method, imp_implementationWithBlock(block))
+    }
+
+    private func _swizzleURLSessionWebSocketCancelWithCloseCodeReasonSelector(_ baseClass: AnyClass) {
+
+        // Prepare
+        let selector = NSSelectorFromString("cancelWithCloseCode:reason:")
+        guard let method = class_getInstanceMethod(baseClass, selector),
+            baseClass.instancesRespond(to: selector) else {
+            logError(name: "_swizzleURLSessionWebSocketCancelWithCloseCodeReasonSelector")
+            return
+        }
+
+        // For safety, we should cast to AnyObject
+        // To prevent app crashes in the future if the object type is changed
+        typealias NewClosureType =  @convention(c) (AnyObject, Selector, NSInteger, AnyObject?) -> Void
+        let originalImp: IMP = method_getImplementation(method)
+        let block: @convention(block) (AnyObject, NSInteger, AnyObject?) -> Void = {[weak self](me, closeCode, reason) in
+
+            // call the original
+            let original: NewClosureType = unsafeBitCast(originalImp, to: NewClosureType.self)
+            original(me, selector, closeCode, reason)
+
+            // Safe-check
+            if let task = me as? URLSessionTask {
+                let newCloseCode = URLSessionWebSocketTask.CloseCode(rawValue: closeCode) ?? .invalid
+                let data = reason as? Data // optional data
+                self?.delegate?.injectorSessionWebSocketDidSendCancelWithReason(task: task, closeCode: newCloseCode, reason: data)
+            } else {
+                assertionFailure("Could not get data from _swizzleURLSessionWebSocketCancelWithCloseCodeReasonSelector. It might causes due to the latest iOS changes. Please contact the author!")
+            }
+        }
+
+        method_setImplementation(method, imp_implementationWithBlock(block))
+    }
+
+    private func wrapWebSocketMessage(object: AnyObject) -> URLSessionWebSocketTask.Message? {
+        if let strValue = object.value(forKey: "string") as? String {
+            return URLSessionWebSocketTask.Message.string(strValue)
+        } else if let dataValue = object.value(forKey: "data") as? Data {
+            return URLSessionWebSocketTask.Message.data(dataValue)
+        }
+        return nil
+    }
+
+    private func wrapWebSocketMessage(strValue: String?, dataValue: Data?) -> URLSessionWebSocketTask.Message? {
+        if let strValue = strValue {
+            return URLSessionWebSocketTask.Message.string(strValue)
+        } else if let dataValue = dataValue {
+            return URLSessionWebSocketTask.Message.data(dataValue)
+        }
+        return nil
     }
 }

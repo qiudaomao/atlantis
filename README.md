@@ -1,6 +1,6 @@
 ![Atlantis: Debug iOS with ease](https://raw.githubusercontent.com/ProxymanApp/atlantis/main/images/cover.png)
 
-A little and powerful iOS framework for intercepting HTTP/HTTPS Traffic from your app. No more messing around with proxy, certificate config. 
+A lightweight and powerful iOS framework for intercepting HTTP/HTTPS Traffic from your app. No more messing around with proxy, certificate config. 
 
 [![Version](https://img.shields.io/cocoapods/v/atlantis-proxyman.svg?style=flat)](https://cocoapods.org/pods/atlantis-proxyman)
 [![Carthage compatible](https://img.shields.io/badge/Carthage-compatible-4BC51D.svg?style=flat)](https://github.com/Carthage/Carthage)
@@ -11,6 +11,8 @@ A little and powerful iOS framework for intercepting HTTP/HTTPS Traffic from you
 
 ## Features
 - [x] **Automatically** intercept all HTTP/HTTPS Traffic with ease
+- [x] Capture WS/WSS Traffic from URLSessionWebSocketTask
+- [x] Capture gRPC traffic 
 - [x] ✅ **No need to config HTTP Proxy, Install or Trust any Certificate**
 - [x] Support iOS Physical Devices and Simulators
 - [x] Review traffic log from macOS [Proxyman](https://proxyman.io) app ([Github](https://github.com/ProxymanApp/Proxyman))
@@ -18,7 +20,7 @@ A little and powerful iOS framework for intercepting HTTP/HTTPS Traffic from you
 - [x] Only for Traffic Inspector, not for Debugging Tools
 - [x] Ready for Production
 
-![Atlantis: Debug iOS with ease](https://raw.githubusercontent.com/ProxymanApp/atlantis/main/images/proxyman_atlantis_3.png)
+![Atlantis: Capture HTTP/HTTPS traffic from iOS app without Proxy and Certificate with Proxyman](https://raw.githubusercontent.com/ProxymanApp/atlantis/main/images/proxyman_atlantis_3.png)
 
 ## How to use
 1. Install Atlantis by CocoaPod or SPM, then starting Atlantis
@@ -28,29 +30,40 @@ By default, Bonjour service will try to connect all Proxyman app in the same net
 - If you have only **ONE** MacOS machine that has Proxyman. Let use the simple version:
 
 ```swift
-import Atlantis
+#if DEBUG
+    import Atlantis
+#endif
 
 // Add to the end of `application(_:didFinishLaunchingWithOptions:)` in AppDelegate.swift or SceneDelegate.swift
-Atlantis.start()
+#if DEBUG
+    Atlantis.start()
+#endif
 ```
 
 - If there are many Proxyman apps from colleague's Mac Machines, and you would Atlantis connects to your macOS machine. Let use `Atlantis.start(hostName:)` version
 
 ```swift
-import Atlantis
+#if DEBUG
+    import Atlantis
+#endif
 
 // Add to the end of `application(_:didFinishLaunchingWithOptions:)` in AppDelegate.swift or SceneDelegate.swift
-Atlantis.start(hostName: "_your_host_name")
+#if DEBUG
+    Atlantis.start(hostName: "_your_host_name")
+#endif
 ```
 
 You can get the `hostName` from Proxyman -> Certificate menu -> Install for iOS -> Atlantis -> How to Start Atlantis -> and copy the `HostName`
 
 <img src="https://raw.githubusercontent.com/ProxymanApp/atlantis/main/images/atlantis_hostname.png" alt="Proxyman screenshot" width="70%" height="auto"/>
 
-- If your project uses Objective-C
+- If your project uses Objective-C, please use **CocoaPod** to install Atlantis (Install via SPM might not work).
 
 ```objective-c
 #import "Atlantis-Swift.h"
+
+// Or import Atlantis as a module, you can use:
+@import Atlantis;
 
 // Add to the end of `application(_:didFinishLaunchingWithOptions:)` in AppDelegate
 [Atlantis startWithHostName:nil];
@@ -63,7 +76,7 @@ You can get the `hostName` from Proxyman -> Certificate menu -> Install for iOS 
 
 ## Requirement
 - macOS Proxyman app 2.11.0+
-- iOS 11.0+ / macOS 10.12+ / Mac Catalyst 11.0+
+- iOS 13.0+ / macOS 10.15+ / Mac Catalyst 13.0+
 - Xcode 11+
 - Swift 5.0+
 
@@ -101,8 +114,22 @@ github "ProxymanApp/atlantis"
 
 For Carthage with Xcode 12, please check out the workaround: https://github.com/Carthage/Carthage/blob/master/Documentation/Xcode12Workaround.md
 
+## WS/WSS Traffic
+From Atlantis 1.9.0+, Atlantis is capable of capturing all [WS/WSS Traffic](https://github.com/ProxymanApp/atlantis/releases/tag/1.9.0), which is made by URLSessionWebSocketTask, and send to Proxyman app.
+You don't need to config anything, it works out of the box.
+
+## Run Example App
+Atlantis provides a simple example that it can demonstrate how to integrate and use Atlantis and Proxyman. Please follow the following steps:
+1. Open Proxyman for macOS
+2. Open iOS Project at `Example/Atlantis-Example-App.xcodeproj`
+3. Start the project with any iPhone/iPad Simulator
+4. Click on buttons on the main screen
+5. Back to Proxyman app and inspect your HTTPS Request/Response.
+
+![Atlantis: Capture HTTP/HTTPS traffic from iOS app without Proxy and Certificate with Proxyman](https://raw.githubusercontent.com/ProxymanApp/atlantis/main/images/iOS_Example_App.png)
+
 ## Advanced Usage
-By default, if your iOS app uses Apple's Networking classes (e.g URLSession or NSURLConnection) or using popular Networking libraries (e.g Alamofire and AFNetworking) to make an HTTP Request, Atlantis will work **OUT OF THE BOX**.
+By default, if your iOS app uses Apple's Networking classes (e.g URLSession) or using popular Networking libraries (e.g Alamofire and AFNetworking) to make an HTTP Request, Atlantis will work **OUT OF THE BOX**.
 
 However, if your app doesn't use any one of them, Atlantis is not able to automatically capture the network traffic. 
 
@@ -140,47 +167,281 @@ You can construct the Request and Response for Atlantis from the following func
 ```
 
 #### 2. My app use GRPC
-You can construct the Request and Response from GRPC models:
+You can construct the unary Request and Response from GRPC models via the interceptor pattern that is provided by
+grpc-swift and leverage this to get a complete log of your calls. 
+
+
+<details><summary>Here is an example for an AtlantisInterceptor</summary>
+
 ```swift
-    /// Helper func to convert GRPC message to Atlantis format that could show on Proxyman app as a HTTP Message
-    /// - Parameters:
-    ///   - url: The url of the grpc message to distinguish each message
-    ///   - requestObject: Request object for the Request (Encodable)
-    ///   - responseObject: Response object for the Response (Encodable)
-    ///   - success: success state. Get from `CallResult.success`
-    ///   - statusCode: statusCode state. Get from `CallResult.statusCode`
-    ///   - statusMessage: statusMessage state. Get from `CallResult.statusMessage`
-    public class func addGRPC<T, U>(url: String,
-                                 requestObject: T?,
-                                 responseObject: U?,
-                                 success: Bool,
-                                 statusCode: Int,
-                                 statusMessage: String?) where T: Encodable, U: Encodable {}
+        import Atlantis
+        import Foundation
+        import GRPC
+        import NIO
+        import NIOHPACK
+        import SwiftProtobuf
+
+        extension HPACKHeaders {
+            var atlantisHeaders: [Header] { map { Header(key: $0.name, value: $0.value) } }
+        }
+
+        public class AtlantisInterceptor<Request: Message, Response: Message>: ClientInterceptor<Request, Response> {
+            private struct LogEntry {
+                let id = UUID()
+                var path: String = ""
+                var started: Date?
+                var request: LogRequest = .init()
+                var response: LogResponse = .init()
+            }
+
+            private struct LogRequest {
+                var metadata: [Header] = []
+                var messages: [String] = []
+                var ended = false
+            }
+
+            private struct LogResponse {
+                var metadata: [Header] = []
+                var messages: [String] = []
+                var end: (status: GRPCStatus, metadata: String)?
+            }
+
+            private var logEntry = LogEntry()
+
+            override public func send(_ part: GRPCClientRequestPart<Request>,
+                                      promise: EventLoopPromise<Void>?,
+                                      context: ClientInterceptorContext<Request, Response>)
+            {
+                logEntry.path = context.path
+                if logEntry.started == nil {
+                    logEntry.started = Date()
+                }
+                switch context.type {
+                case .clientStreaming, .serverStreaming, .bidirectionalStreaming:
+                    streamingSend(part, type: context.type)
+                case .unary:
+                    unarySend(part)
+                }
+                super.send(part, promise: promise, context: context)
+            }
+
+            private func streamingSend(_ part: GRPCClientRequestPart<Request>, type: GRPCCallType) {
+                switch part {
+                case .metadata(let metadata):
+                    logEntry.request.metadata = metadata.atlantisHeaders
+                case .message(let messageRequest, _):
+                    Atlantis.addGRPCStreaming(id: logEntry.id,
+                                              path: logEntry.path,
+                                              message: .data((try? messageRequest.jsonUTF8Data()) ?? Data()),
+                                              success: true,
+                                              statusCode: 0,
+                                              statusMessage: nil,
+                                              streamingType: type.streamingType,
+                                              type: .send,
+                                              startedAt: logEntry.started,
+                                              endedAt: Date(),
+                                              HPACKHeadersRequest: logEntry.request.metadata,
+                                              HPACKHeadersResponse: logEntry.response.metadata)
+                case .end:
+                    logEntry.request.ended = true
+                    switch type {
+                    case .unary, .serverStreaming, .bidirectionalStreaming:
+                        break
+                    case .clientStreaming:
+                        Atlantis.addGRPCStreaming(id: logEntry.id,
+                                                  path: logEntry.path,
+                                                  message: .string("end"),
+                                                  success: true,
+                                                  statusCode: 0,
+                                                  statusMessage: nil,
+                                                  streamingType: type.streamingType,
+                                                  type: .send,
+                                                  startedAt: logEntry.started,
+                                                  endedAt: Date(),
+                                                  HPACKHeadersRequest: logEntry.request.metadata,
+                                                  HPACKHeadersResponse: logEntry.response.metadata)
+                    }
+                }
+            }
+
+            private func unarySend(_ part: GRPCClientRequestPart<Request>) {
+                switch part {
+                case .metadata(let metadata):
+                    logEntry.request.metadata = metadata.atlantisHeaders
+                case .message(let messageRequest, _):
+                    logEntry.request.messages.append((try? messageRequest.jsonUTF8Data())?.prettyJson ?? "")
+                case .end:
+                    logEntry.request.ended = true
+                }
+            }
+
+            override public func receive(_ part: GRPCClientResponsePart<Response>, context: ClientInterceptorContext<Request, Response>) {
+                logEntry.path = context.path
+                switch context.type {
+                case .unary:
+                    unaryReceive(part)
+                case .bidirectionalStreaming, .serverStreaming, .clientStreaming:
+                    streamingReceive(part, type: context.type)
+                }
+                super.receive(part, context: context)
+            }
+
+            private func streamingReceive(_ part: GRPCClientResponsePart<Response>, type: GRPCCallType) {
+                switch part {
+                case .metadata(let metadata):
+                    logEntry.response.metadata = metadata.atlantisHeaders
+                case .message(let messageResponse):
+                    Atlantis.addGRPCStreaming(id: logEntry.id,
+                                              path: logEntry.path,
+                                              message: .data((try? messageResponse.jsonUTF8Data()) ?? Data()),
+                                              success: true,
+                                              statusCode: 0,
+                                              statusMessage: nil,
+                                              streamingType: type.streamingType,
+                                              type: .receive,
+                                              startedAt: logEntry.started,
+                                              endedAt: Date(),
+                                              HPACKHeadersRequest: logEntry.request.metadata,
+                                              HPACKHeadersResponse: logEntry.response.metadata)
+                case .end(let status, _):
+                    Atlantis.addGRPCStreaming(id: logEntry.id,
+                                              path: logEntry.path,
+                                              message: .string("end"),
+                                              success: status.isOk,
+                                              statusCode: status.code.rawValue,
+                                              statusMessage: status.message,
+                                              streamingType: type.streamingType,
+                                              type: .receive,
+                                              startedAt: logEntry.started,
+                                              endedAt: Date(),
+                                              HPACKHeadersRequest: logEntry.request.metadata,
+                                              HPACKHeadersResponse: logEntry.response.metadata)
+                }
+            }
+
+            private func unaryReceive(_ part: GRPCClientResponsePart<Response>) {
+                switch part {
+                case .metadata(let metadata):
+                    logEntry.response.metadata = metadata.atlantisHeaders
+                case .message(let messageResponse):
+                    logEntry.response.messages.append((try? messageResponse.jsonUTF8Data())?.prettyJson ?? "")
+                case .end(let status, _):
+                    Atlantis.addGRPCUnary(path: logEntry.path,
+                                          requestObject: logEntry.request.messages.joined(separator: "\n").data(using: .utf8),
+                                          responseObject: logEntry.response.messages.joined(separator: "\n").data(using: .utf8),
+                                          success: status.isOk,
+                                          statusCode: status.code.rawValue,
+                                          statusMessage: status.message,
+                                          startedAt: logEntry.started,
+                                          endedAt: Date(),
+                                          HPACKHeadersRequest: logEntry.request.metadata,
+                                          HPACKHeadersResponse: logEntry.response.metadata)
+                }
+            }
+
+            override public func errorCaught(_ error: Error, context: ClientInterceptorContext<Request, Response>) {
+                logEntry.path = context.path
+                switch context.type {
+                case .unary, .bidirectionalStreaming, .serverStreaming, .clientStreaming:
+                    Atlantis.addGRPCUnary(path: logEntry.path,
+                                          requestObject: logEntry.request.messages.joined(separator: "\n").data(using: .utf8),
+                                          responseObject: logEntry.response.messages.joined(separator: "\n").data(using: .utf8),
+                                          success: false,
+                                          statusCode: GRPCStatus(code: .unknown, message: "").code.rawValue,
+                                          statusMessage: error.localizedDescription,
+                                          startedAt: logEntry.started,
+                                          endedAt: Date(),
+                                          HPACKHeadersRequest: logEntry.request.metadata,
+                                          HPACKHeadersResponse: logEntry.response.metadata)
+                }
+
+                super.errorCaught(error, context: context)
+            }
+
+            override public func cancel(promise: EventLoopPromise<Void>?, context: ClientInterceptorContext<Request, Response>) {
+                logEntry.path = context.path
+                switch context.type {
+                case .unary, .bidirectionalStreaming, .serverStreaming, .clientStreaming:
+                    Atlantis.addGRPCUnary(path: logEntry.path,
+                                          requestObject: logEntry.request.messages.joined(separator: "\n").data(using: .utf8),
+                                          responseObject: logEntry.response.messages.joined(separator: "\n").data(using: .utf8),
+                                          success: false,
+                                          statusCode: GRPCStatus(code: .cancelled, message: nil).code.rawValue,
+                                          statusMessage: "canceled",
+                                          startedAt: logEntry.started,
+                                          endedAt: Date(),
+                                          HPACKHeadersRequest: logEntry.request.metadata,
+                                          HPACKHeadersResponse: logEntry.response.metadata)
+                }
+                super.cancel(promise: promise, context: context)
+            }
+        }
+
+        extension GRPCCallType {
+            var streamingType: Atlantis.GRPCStreamingType {
+                switch self {
+                case .clientStreaming:
+                    return .client
+                case .serverStreaming:
+                    return .server
+                case .bidirectionalStreaming:
+                    return .server
+                case .unary:
+                    fatalError("Unary is not a streaming type")
+                }
+            }
+        }
+
+        private extension Data {
+            var prettyJson: String? {
+                guard let object = try? JSONSerialization.jsonObject(with: self),
+                      let data = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted]),
+                      let prettyPrintedString = String(data: data, encoding: .utf8) else {
+                          return nil
+                      }
+                return prettyPrintedString
+            }
+        }
 ```
+
+</details>
+
 - Example:
 ```swift
-// Your GRPC services that is generated from SwiftGRPC
-private let client = NoteServiceServiceClient.init(address: "127.0.0.1:50051", secure: false)
+    public class YourInterceptorFactory: YourClientInterceptorFactoryProtocol {
+        func makeGetYourCallInterceptors() -> [ClientInterceptor<YourRequest, YourResponse>] {
+            [AtlantisInterceptor()]
+        }
+    }
 
-// Note is a struct that is generated from a protobuf file
-func insertNote(note: Note, completion: @escaping(Note?, CallResult?) -> Void) {
-    _ = try? client.insert(note, completion: { (createdNote, result) in
-    
-        // Add to atlantis and show it on Proxyman app
-        Atlantis.addGRPC(url: "https://my-server.com/grpc",
-                         requestObject: note,
-                         responseObject: createdNote,
-                         success: result.success,
-                         statusCode: result.statusCode.rawValue,
-                         statusMessage: result.statusMessage)
-    })
-}
+    // Your GRPC services that is generated from SwiftGRPC
+    private let client = NoteServiceServiceClient.init(channel: connectionChannel, interceptors: YourInterceptorFactory())
 ```
+
+#### 3. Use Atlantis on Swift Playground
+Atlantis is capable of capturing the HTTP/HTTPS and WS/WSS traffic from your Swift Playground.
+
+1. Use [Arena](https://github.com/finestructure/Arena) to generate a new Swift Playground with Atlantis. If you would like to add Atlantis to your existing Swift Playground, please follow [this tutorial](https://wwdcbysundell.com/2020/importing-swift-packages-into-a-playground-in-xcode12/).
+2. Enable Swift Playground Mode
+```swift
+Atlantis.setIsRunningOniOSPlayground(true)
+Atlantis.start()
+```
+
+3. Trust Proxyman self-signed certificate
+
+- for macOS: You don't need to do anything if you've already installed & trusted Proxyman Certificate in Certificate Menu -> Install on this Mac.
+- for iOS: Since iOS Playground doesn't start any iOS Simulator, it's impossible to inject the Proxyman Certificate. Therefore, we have to manually trust the certificate. Please use [NetworkSSLProxying](https://gist.github.com/NghiaTranUIT/275c8da5068d506869a21bd16da27094) class to do it.
+
+4. Make an HTTP/HTTPS or WS/WSS and inspect it on the Proxyman app.
+
+- Sample Code: https://github.com/ProxymanApp/Atlantis-Swift-Playground-Sample-App
+
 
 ## FAQ
 #### 1. How does Atlantis work?
 
-Atlantis uses [Method Swizzling](https://nshipster.com/method-swizzling/) technique to swizzle certain functions of NSURLSession and NSURLConnection that enables Atlantis captures HTTP/HTTPS traffic on the fly.
+Atlantis uses [Method Swizzling](https://nshipster.com/method-swizzling/) technique to swizzle certain functions of NSURLSession that enables Atlantis captures HTTP/HTTPS traffic on the fly.
 
 Then it sends to [Proxyman app](https://proxyman.io) for inspecting later.
 
