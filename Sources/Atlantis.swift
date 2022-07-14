@@ -9,13 +9,13 @@
 import Foundation
 import ObjectiveC
 
-public protocol AtlantisDelegate: class {
+public protocol AtlantisDelegate: AnyObject {
 
     func atlantisDidHaveNewPackage(_ package: TrafficPackage)
 }
 
 /// The main class of Atlantis
-/// Responsible to swizzle certain functions from URLSession and URLConnection
+/// Responsible to swizzle certain functions from URLSession
 /// to capture the network and send to Proxyman app via Bonjour Service
 public final class Atlantis: NSObject {
 
@@ -28,16 +28,26 @@ public final class Atlantis: NSObject {
     private var injector: Injector = NetworkInjector()
     private(set) var configuration: Configuration = Configuration.default()
     private var packages: [String: TrafficPackage] = [:]
+    private lazy var waitingWebsocketPackages: [String: [TrafficPackage]] = [:]
     private let queue = DispatchQueue(label: "com.proxyman.atlantis")
 
     // MARK: - Variables
 
     /// Check whether or not Bonjour Service is available in current devices
     private static var isServiceAvailable: Bool = {
+
+        #if os(iOS)
+
+        // on iOS Swift Playgroud, no need to add configs to Info.plist
+        if Atlantis.shared.isRunningOniOSPlayground {
+            return true
+        }
+
         // Require extra config for iOS 14
         if #available(iOS 14, *) {
             return Bundle.main.hasBonjourServices && Bundle.main.hasLocalNetworkUsageDescription
         }
+        #endif
         // Below iOS 14, Bonjour service is always available
         return true
     }()
@@ -49,6 +59,10 @@ public final class Atlantis: NSObject {
     /// Determine whether or not the transport layer (e.g. Bonjour service) is enabled
     /// If it's enabled, it will send the traffic to Proxyman macOS app
     private var isEnabledTransportLayer = true
+
+    /// Determine if Atlantis is running on Swift Playground
+    /// If it's enabled, Atlantis will bypass some safety checks
+    private var isRunningOniOSPlayground = false
 
     // MARK: - Init
 
@@ -63,7 +77,7 @@ public final class Atlantis: NSObject {
     /// Build version of Atlantis
     /// It's essential for Proxyman to known if it's compatible with this version
     /// Instead of receving the number from the info.plist, we should hardcode here because the info file doesn't exist in SPM
-    public static let buildVersion: String = "1.8.0"
+    public static let buildVersion: String = "1.17.0"
 
     /// Start Swizzle all network functions and monitoring the traffic
     /// It also starts looking Bonjour network from Proxyman app.
@@ -113,6 +127,11 @@ public final class Atlantis: NSObject {
         Atlantis.shared.isEnabledTransportLayer = isEnabled
     }
 
+    /// Enable Swift Playground mode
+    public class func setIsRunningOniOSPlayground(_ isEnabled: Bool) {
+        Atlantis.shared.isRunningOniOSPlayground = isEnabled
+    }
+
     /// Set delegate to observe the traffic
     public class func setDelegate(_ delegate: AtlantisDelegate) {
         Atlantis.shared.delegate = delegate
@@ -130,6 +149,16 @@ extension Atlantis {
             print("---------- Github: https://github.com/ProxymanApp/atlantis")
             print("---------------------------------------------------------------------------------")
         }
+
+        // Don't need to check configs on Info.plist
+        if Atlantis.shared.isRunningOniOSPlayground {
+            print("---------- Running on Swift Playground Mode")
+            print("If you get the SSL Error, please follow this code: https://gist.github.com/NghiaTranUIT/275c8da5068d506869a21bd16da27094")
+            return
+        }
+
+        // For iOS
+        #if os(iOS)
 
         // Check required config for Local Network in the main app's info.plist
         // Ref: https://developer.apple.com/news/?id=0oi77447
@@ -155,7 +184,7 @@ extension Atlantis {
             if !instruction.isEmpty {
                 let message = """
                 ---------------------------------------------------------------------------------
-                --------- [Atlantis] MISSING REQUIRED CONFIG from Info.plist for iOS 14+ --------
+                --------- ⚠️ [Atlantis] MISSING REQUIRED CONFIG from Info.plist for iOS 14+ --------
                 ---------------------------------------------------------------------------------
                 Read more at: https://docs.proxyman.io/atlantis/atlantis-for-ios
                 Please add the following config to your MainApp's Info.plist
@@ -166,6 +195,7 @@ extension Atlantis {
                 print(message)
             }
         }
+        #endif
     }
 
     private func getPackage(_ taskOrConnection: AnyObject) -> TrafficPackage? {
@@ -182,13 +212,6 @@ extension Atlantis {
         case let task as URLSessionTask:
             guard let package = TrafficPackage.buildRequest(sessionTask: task, id: id) else {
                 assertionFailure("Should build package from URLSessionTask")
-                return nil
-            }
-            packages[id] = package
-            return package
-        case let connection as NSURLConnection:
-            guard let package = TrafficPackage.buildRequest(connection: connection, id: id) else {
-                assertionFailure("Should build package from NSURLConnection")
                 return nil
             }
             packages[id] = package
@@ -251,31 +274,75 @@ extension Atlantis: InjectorDelegate {
             }
         }
     }
+}
 
-    func injectorConnectionDidReceive(connection: NSURLConnection, response: URLResponse) {
+// MARK: - Websocket
+
+extension Atlantis {
+
+    func injectorSessionWebSocketDidSendPingPong(task: URLSessionTask) {
+        let message = URLSessionWebSocketTask.Message.string("ping")
+        sendWebSocketMessage(task: task, messageType: .pingPong, message: message)
+    }
+
+    func injectorSessionWebSocketDidReceive(task: URLSessionTask, message: URLSessionWebSocketTask.Message) {
+        sendWebSocketMessage(task: task, messageType: .receive, message: message)
+    }
+
+    func injectorSessionWebSocketDidSendMessage(task: URLSessionTask, message: URLSessionWebSocketTask.Message) {
+        sendWebSocketMessage(task: task, messageType: .send, message: message)
+    }
+
+    private func sendWebSocketMessage(task: URLSessionTask, messageType: WebsocketMessagePackage.MessageType, message: URLSessionWebSocketTask.Message) {
         queue.sync {
+            // Since it's not possible to revert the Method Swizzling change
+            // We use isEnable instead
             guard Atlantis.isEnabled.value else { return }
-
-            // Cache
-            let package = getPackage(connection)
-            package?.updateResponse(response)
+            prepareAndSendWSMessage(task: task) { (id) -> WebsocketMessagePackage? in
+                guard let atlantisMessage = WebsocketMessagePackage.Message(message: message) else {
+                    return nil
+                }
+                return WebsocketMessagePackage(id: id, message: atlantisMessage, messageType: messageType)
+            }
         }
     }
 
-    func injectorConnectionDidReceive(connection: NSURLConnection, data: Data) {
+    func injectorSessionWebSocketDidSendCancelWithReason(task: URLSessionTask, closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {
         queue.sync {
+            // Since it's not possible to revert the Method Swizzling change
+            // We use isEnable instead
             guard Atlantis.isEnabled.value else { return }
-            let package = getPackage(connection)
-            package?.appendResponseData(data)
+            prepareAndSendWSMessage(task: task) { (id) -> WebsocketMessagePackage? in
+                return WebsocketMessagePackage(id: id, closeCode: closeCode.rawValue, reason: reason)
+            }
+
+            // Remove after the WS connection is closed
+            let id = PackageIdentifier.getID(taskOrConnection: task)
+            packages.removeValue(forKey: id)
         }
     }
 
-    func injectorConnectionDidFailWithError(connection: NSURLConnection, error: Error) {
-        handleDidFinish(connection, error: error)
-    }
+    private func prepareAndSendWSMessage(task: URLSessionTask, wsPackageBuilder: (String) -> WebsocketMessagePackage?) {
+        // Get the ID
+        let id = PackageIdentifier.getID(taskOrConnection: task)
 
-    func injectorConnectionDidFinishLoading(connection: NSURLConnection) {
-        handleDidFinish(connection, error: nil)
+        // The value should be available
+        if let package = packages[id] {
+
+            // Build a package
+            guard let wsPackage = wsPackageBuilder(id) else {
+                print("[Atlantis][Error] Skipping sending WS Packages!! Please contact Proxyman Team.")
+                return
+            }
+
+            // It's important to set a message with a WS package
+            package.setWebsocketMessagePackage(package: wsPackage)
+
+            // Sending via Bonjour service
+            startSendingWebsocketMessage(package)
+        } else {
+            assertionFailure("Something went wrong! Should find a previous WS Package! Please contact the author!")
+        }
     }
 }
 
@@ -298,7 +365,18 @@ extension Atlantis {
             startSendingMessage(package: package)
 
             // Then remove it from our cache
-            packages.removeValue(forKey: package.id)
+            switch package.packageType {
+            case .http:
+                packages.removeValue(forKey: package.id)
+            case .websocket:
+                // Don't remove the WS traffic
+                // Keep it in the packages, so we can send the WS Message
+                // Only remove the we receive the Close message
+
+                // Sending all waiting WS
+                attemptSendingAllWaitingWSPackages(id: package.id)
+                break
+            }
         }
     }
 
@@ -312,11 +390,52 @@ extension Atlantis {
             }
         }
 
-        // Send via Proxyman app
-        if isEnabledTransportLayer {
-            let message = Message.buildTrafficMessage(id: configuration.id, item: package)
+        // Send to Proxyman app
+        guard isEnabledTransportLayer else {
+            return
+        }
+
+        let message = Message.buildTrafficMessage(id: configuration.id, item: package)
+        transporter.send(package: message)
+    }
+
+    func startSendingWebsocketMessage(_ package: TrafficPackage) {
+        let id = package.id
+
+        // If the response of WS is nil
+        // It means that the WS is not finished yet,
+        // We don't send it, we put it in the waiting queue
+        if package.response == nil {
+            var waitingList = waitingWebsocketPackages[id] ?? []
+            waitingList.append(package)
+            waitingWebsocketPackages[id] = waitingList
+            return
+        }
+
+        // Sending all waiting WS if need
+        attemptSendingAllWaitingWSPackages(id: id)
+
+        // Send the current one
+        let message = Message.buildWebSocketMessage(id: configuration.id, item: package)
+        transporter.send(package: message)
+    }
+
+    private func attemptSendingAllWaitingWSPackages(id: String) {
+        guard !waitingWebsocketPackages.isEmpty else {
+            return
+        }
+        guard let waitingList = waitingWebsocketPackages[id] else {
+            return
+        }
+
+        // Send all waiting WS Message
+        waitingList.forEach { item in
+            let message = Message.buildWebSocketMessage(id: configuration.id, item: item)
             transporter.send(package: message)
         }
+
+        // Release the list
+        waitingWebsocketPackages[id] = nil
     }
 }
 

@@ -14,7 +14,7 @@ protocol Injector {
     func injectAllNetworkClasses()
 }
 
-protocol InjectorDelegate: class {
+protocol InjectorDelegate: AnyObject {
 
     // For URLSession
     func injectorSessionDidCallResume(task: URLSessionTask)
@@ -23,11 +23,11 @@ protocol InjectorDelegate: class {
     func injectorSessionDidComplete(task: URLSessionTask, error: Error?)
     func injectorSessionDidUpload(task: URLSessionTask, request: NSURLRequest, data: Data?)
 
-    // For URLConnection
-    func injectorConnectionDidReceive(connection: NSURLConnection, response: URLResponse)
-    func injectorConnectionDidReceive(connection: NSURLConnection, data: Data)
-    func injectorConnectionDidFailWithError(connection: NSURLConnection, error: Error)
-    func injectorConnectionDidFinishLoading(connection: NSURLConnection)
+    // Websocket
+    func injectorSessionWebSocketDidSendMessage(task: URLSessionTask, message: URLSessionWebSocketTask.Message)
+    func injectorSessionWebSocketDidReceive(task: URLSessionTask, message: URLSessionWebSocketTask.Message)
+    func injectorSessionWebSocketDidSendPingPong(task: URLSessionTask)
+    func injectorSessionWebSocketDidSendCancelWithReason(task: URLSessionTask, closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?)
 }
 
 final class NetworkInjector: Injector {
@@ -42,7 +42,6 @@ final class NetworkInjector: Injector {
         // Make sure we swizzle *ONCE*
         DispatchQueue.once {
             injectAllURLSession()
-            injectAllURLConnection()
         }
     }
 }
@@ -55,6 +54,7 @@ extension NetworkInjector {
         // iOS 9, 10, 11, 12, 13, 14: __NSCFURLLocalSessionConnection
         // This approach works with delegate or complete block from URLSession
         let sessionClass: AnyClass? = NSClassFromString("__NSCFURLLocalSessionConnection") ?? NSClassFromString("__NSCFURLSessionConnection")
+
         if let anySessionClass = sessionClass {
             injectIntoURLSessionDelegate(anyClass: anySessionClass)
         }
@@ -64,29 +64,15 @@ extension NetworkInjector {
 
         // Upload
         injectURLSessionUploadTasks()
-    }
 
-    private func injectAllURLConnection() {
-        // Find all classes that conform URLConnection delegates and start the injection
-        let allClasses = Runtime.getAllClasses()
-        for anyClass in allClasses {
-            if class_conformsToProtocol(anyClass, NSURLConnectionDataDelegate.self) {
-                injectURLConnectionDelegate(anyClass: anyClass)
-            }
-        }
+        // Websocket
+        injectURLSessionWebsocketTasks()
     }
 
     private func injectIntoURLSessionDelegate(anyClass: AnyClass) {
         _swizzleURLSessionDataTaskDidReceiveResponse(baseClass: anyClass)
         _swizzleURLSessionDataTaskDidReceiveData(baseClass: anyClass)
         _swizzleURLSessionTaskDidCompleteWithError(baseClass: anyClass)
-    }
-
-    private func injectURLConnectionDelegate(anyClass: AnyClass) {
-        _swizzleConnectionDidReceiveResponse(anyClass: anyClass)
-        _swizzleConnectionDidReceiveData(anyClass: anyClass)
-        _swizzleConnectionDidFinishLoading(anyClass: anyClass)
-        _swizzleConnectionDidFailWithError(anyClass: anyClass)
     }
 
     private func injectURLSessionResume() {
@@ -98,7 +84,7 @@ extension NetworkInjector {
         if !ProcessInfo.processInfo.responds(to: #selector(getter: ProcessInfo.operatingSystemVersion)) {
             baseResumeClass = NSClassFromString("__NSCFLocalSessionTask")
         } else {
-            #if targetEnvironment(macCatalyst)
+            #if targetEnvironment(macCatalyst) || os(macOS)
             baseResumeClass = URLSessionTask.self
             #else
             let majorVersion = ProcessInfo.processInfo.operatingSystemVersion.majorVersion
@@ -120,5 +106,9 @@ extension NetworkInjector {
 
     private func injectURLSessionUploadTasks() {
         _swizzleURLSessionUploadSelector(baseClass: URLSession.self)
+    }
+
+    private func injectURLSessionWebsocketTasks() {
+        _swizzleURLSessionWebsocketSelector()
     }
 }

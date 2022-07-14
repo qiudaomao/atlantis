@@ -7,6 +7,11 @@
 //
 
 import Foundation
+import Network
+
+#if os(iOS)
+import UIKit
+#endif
 
 protocol Transporter {
 
@@ -18,6 +23,17 @@ protocol Transporter {
 protocol Serializable {
 
     func toData() -> Data?
+}
+
+extension Serializable {
+
+    func toCompressedData() -> Data? {
+        guard let rawData = self.toData() else { return nil }
+
+        // Compress data by gzip
+        // Fallback to raw data if it's unsuccess
+        return rawData.gzip() ?? rawData
+    }
 }
 
 final class NetServiceTransport: NSObject {
@@ -32,18 +48,28 @@ final class NetServiceTransport: NSObject {
     // For some reason, Stream Task could send a big file
     // https://github.com/ProxymanApp/atlantis/issues/57
     static let MaximumSizePackage = 52428800 // 50Mb
+
     private let serviceBrowser: NetServiceBrowser
     private var services: [NetService] = []
     private let queue = DispatchQueue(label: "com.proxyman.atlantis.netservices") // Serial on purpose
     private let session: URLSession
-    private var task: URLSessionStreamTask?
     private var pendingPackages: [Serializable] = []
     private var config: Configuration?
+
+    // Multiple task connection
+    // it allows Atlantis can simultaneously connect to many Proxyman instances
+    // https://github.com/ProxymanApp/atlantis/issues/72
+    private var connections: [NWConnection]
+
+    // The maximum number of pending item to prevent Atlantis consumes too much RAM
+    // https://github.com/ProxymanApp/atlantis/issues/74
+    private let maxPendingItem = 30
 
     // MARK: - Init
 
     override init() {
         self.serviceBrowser = NetServiceBrowser()
+        self.connections = []
         let config = URLSessionConfiguration.default
         #if os(iOS)
         config.waitsForConnectivity = true
@@ -51,6 +77,11 @@ final class NetServiceTransport: NSObject {
         session = URLSession(configuration: config)
         super.init()
         serviceBrowser.delegate = self
+        initNotification()
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
     }
 }
 
@@ -62,7 +93,7 @@ extension NetServiceTransport: Transporter {
         if let hostName = config.hostName {
             print("[Atlantis] Try Connecting to Proxyman with HostName = \(hostName)")
         } else {
-            print("[Atlantis] Looking for Proxman app in the network...")
+            print("[Atlantis] Looking for Proxyman app in the network...")
         }
 
         self.config = config
@@ -83,66 +114,80 @@ extension NetServiceTransport: Transporter {
             services.forEach { $0.stop() }
             services.removeAll()
             serviceBrowser.stop()
+            connections.forEach { $0.cancel() }
+            connections.removeAll()
         }
     }
 
     func send(package: Serializable) {
         queue.async {[weak self] in
             guard let strongSelf = self else { return }
-            guard let task = strongSelf.task, task.state == .running else {
+            guard !strongSelf.connections.isEmpty else {
                 // It means the connection is not ready
                 // We add the package to the pending list
                 strongSelf.appendToPendingList(package)
                 return
             }
 
-            // Send the main one
-            strongSelf.stream(package: package)
+            // Send to all connections
+            strongSelf.streamToAllConnections(package: package)
         }
     }
 
-    private func stream(package: Serializable) {
-        guard let rawData = package.toData() else { return }
-
+    private func streamToAllConnections(package: Serializable) {
         // Compress data by gzip
-        // Fallback to raw data if it's unsuccess
-        let data = rawData.gzip() ?? rawData
+        guard let compressedData = package.toCompressedData() else { return }
+
+        // Send to all available connection
+        for connection in connections {
+            send(connection: connection, data: compressedData)
+        }
+    }
+
+    private func send(connection: NWConnection, data: Data) {
+        guard connection.state == .ready else {
+            print("⚠️ The connection is not ready. It might be a bug!")
+            return
+        }
 
         // Compose a message
         // [1]: the length of the second message. We reserver 8 bytes to store this data
         // [2]: The actual message
 
-        let buffer = NSMutableData()
+        // 1. Send length of the message first
+        let headerData = NSMutableData()
         var lengthPackage = data.count
-        buffer.append(&lengthPackage, length: Int(MemoryLayout<UInt64>.stride))
-        buffer.append([UInt8](data), length: data.count)
+        headerData.append(&lengthPackage, length: Int(MemoryLayout<UInt64>.stride))
 
-        // Write data
-        task?.write(buffer as Data, timeout: 60) {[weak self] (error) in
-            guard let strongSelf = self else { return }
-            if let nsError = error as NSError? {
-                // The socket is disconnected, we should add to the pending list
-                if nsError.code == 57 {
-                    // Should be called in the serial queue because it's called from URLSession's queue
-                    strongSelf.queue.async {
-                        strongSelf.appendToPendingList(package)
-                    }
-                } else {
-                    print("[Atlantis][ERROR] Write socket Error: \(String(describing: error))")
-                }
+        // Send the message, must use isComplete = false
+        connection.send(content: headerData, isComplete: false, completion: .contentProcessed({ error in
+            if let error = error {
+                print("[Atlantis][Error] Error sending frame header: \(error)")
             }
-        }
+        }))
+
+        // 2. send the actual message
+        connection.send(content: data, completion: .contentProcessed({ error in
+            if let error = error {
+                print("[Atlantis][Error] Error sending frame content: \(error)")
+            }
+        }))
     }
 
     private func appendToPendingList(_ package: Serializable) {
+        // For the sake of simplicity, we remove all items if it exceeds the limit
+        // In the future, we can implement a deque
+        if pendingPackages.count >= maxPendingItem {
+            pendingPackages.removeAll()
+        }
         pendingPackages.append(package)
     }
 
-    private func flushAllPendingIfNeed() {
+    private func flushAllPendingPackagesIfNeed() {
         guard !pendingPackages.isEmpty else { return }
         print("[Atlantis] Flush \(pendingPackages.count) items")
         for package in pendingPackages {
-            stream(package: package)
+            streamToAllConnections(package: package)
         }
         pendingPackages.removeAll()
     }
@@ -171,11 +216,6 @@ extension NetServiceTransport {
             }
         }
 
-        // Stop previous connection if need
-        if let task = task {
-            task.closeWrite()
-        }
-
         guard let hostName = service.hostName else {
             print("[Atlantis][ERROR] Could not receive the host name from NetService!")
             return
@@ -184,32 +224,71 @@ extension NetServiceTransport {
         // use HostName and Port instead of streamTask(with service: NetService)
         // It's crashed on iOS 14 for some reasons
         print("[Atlantis] ✅ Connect to \(hostName)")
-        task = session.streamTask(withHostName: hostName, port: service.port)
 
-        // As we're going to call the -resume method, it will be swizzled by Atlantis
-        // We should not do it
-        // Set a runtime id that we can receive later
-        task?.setFromAtlantisFramework()
+        // Use NWConnection instead of URLSessionStreamTask
+        // Because we've recently encountered some crashed when reading/writing data from Proxyman app
+        // The problem might be we use different two connection classes
+        // Proxyman uses NWConnection, but the old version of Atlantis used URLSessionStreamTask
+        //
+        // Use the same NWConnection in both apps might fix the crash. However, NWConnection requires macOS 10.14 and iOS 13.0
+        //
+        let connection = NWConnection(to: .service(name: service.name, type: service.type, domain: service.domain, interface: nil), using: .tcp)
+        setupConnectionStateHandler(connection)
 
-        // Start the socket
-        task?.resume()
-
-        // All pending
+        // Safe-thread
         queue.async {[weak self] in
-            guard let strongSelf = self else { return }
-
-            //
-            if let config = strongSelf.config {
-                // Create a first connection message
-                // which contains the project, device metadata
-                let connectionMessage = Message.buildConnectionMessage(id: config.id, item: ConnectionPackage(config: config))
-
-                // Add to top of the pending list, when the connection is available, it will send firstly
-                strongSelf.pendingPackages.insert(connectionMessage, at: 0)
-            }
-
-            self?.flushAllPendingIfNeed()
+            self?.connections.append(connection)
         }
+
+        // Start
+        connection.start(queue: queue)
+    }
+
+    private func setupConnectionStateHandler(_ connection: NWConnection) {
+        connection.stateUpdateHandler = {[weak self] (newState) in
+            guard let strongSelf = self else { return }
+            switch (newState) {
+            case .setup:
+                print("Connection setup")
+            case .preparing:
+                print("Connection preparing")
+            case .ready:
+                print("Connection established")
+
+                // After the connection is established, Tell Proxyman app that who we are
+                strongSelf.queue.async {
+                    strongSelf.sendConnectionPackage(connection: connection)
+                }
+
+            case .waiting(let error):
+                print("Connection to server waiting to establish, error=\(error)")
+            case .failed(let error):
+                print("Connection to server failed, error=\(error)")
+                strongSelf.connections.removeAll { $0 === connection }
+            case .cancelled:
+                print("Connection was cancelled, not retrying")
+                strongSelf.connections.removeAll { $0 === connection }
+            @unknown default:
+                break
+            }
+        }
+    }
+
+    private func sendConnectionPackage(connection: NWConnection) {
+        guard let config = config else {
+            return
+        }
+
+        // Create a first connection message
+        // which contains the project, device metadata
+        let connectionMessage = Message.buildConnectionMessage(id: config.id, item: ConnectionPackage(config: config))
+        guard let data = connectionMessage.toCompressedData() else {
+            return
+        }
+        send(connection: connection, data: data)
+
+        // Flush all waiting data
+        flushAllPendingPackagesIfNeed()
     }
 }
 
@@ -263,5 +342,23 @@ extension NetServiceTransport: NetServiceDelegate {
 
     func netService(_ sender: NetService, didNotResolve errorDict: [String : NSNumber]) {
         print("[Atlantis][ERROR] didNotResolve \(errorDict)")
+    }
+}
+
+// MARK: - Private
+
+extension NetServiceTransport {
+
+    private func initNotification() {
+        #if os(iOS)
+        // Memory Warning notification is only available on iOS
+        NotificationCenter.default.addObserver(self, selector: #selector(self.didReceiveMemoryNotification), name: UIApplication.didReceiveMemoryWarningNotification, object: nil)
+        #endif
+    }
+
+    @objc private func didReceiveMemoryNotification() {
+        queue.async {[weak self] in
+            self?.pendingPackages.removeAll()
+        }
     }
 }
